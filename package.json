@@ -1,0 +1,16 @@
+{
+  "name": "levi-urgent",
+  "version": "1.0.0",
+  "description": "Levi Urgent - Solana Memecoin Trading Bot",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "@solana/web3.js": "^1.91.8",
+    "axios": "^1.6.8",
+    "dotenv": "^16.4.5",
+    "bs58": "^5.0.0"
+  }
+}
