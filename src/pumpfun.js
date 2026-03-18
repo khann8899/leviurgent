@@ -4,15 +4,19 @@ const seenTokens = new Set();
 async function fetchNewPumpFunTokens() {
   try {
     const response = await axios.get(
-      'https://api.dexscreener.com/token-boosts/latest/v1',
+      'https://api.dexscreener.com/latest/dex/pairs/solana',
       { timeout: 8000 }
     );
-    const tokens = response.data || [];
+    const pairs = response.data?.pairs || [];
     const newCoins = [];
-    for (const token of tokens) {
-      if (token.chainId !== 'solana') continue;
-      const mint = token.tokenAddress;
+    const now = Date.now();
+
+    for (const pair of pairs) {
+      const mint = pair.baseToken?.address;
       if (!mint || seenTokens.has(mint)) continue;
+      if (mint === 'So11111111111111111111111111111111111111112') continue;
+      const ageMinutes = (now - pair.pairCreatedAt) / 1000 / 60;
+      if (ageMinutes > 120 || ageMinutes < 0) continue;
       seenTokens.add(mint);
       if (seenTokens.size > 5000) {
         const first = seenTokens.values().next().value;
@@ -20,9 +24,15 @@ async function fetchNewPumpFunTokens() {
       }
       newCoins.push({
         mintAddress: mint,
-        symbol: token.symbol || 'UNKNOWN',
-        name: token.name || 'Unknown',
-        createdAt: Date.now(),
+        symbol: pair.baseToken.symbol || 'UNKNOWN',
+        name: pair.baseToken.name || 'Unknown',
+        priceUSD: parseFloat(pair.priceUsd) || 0,
+        liquidityUSD: pair.liquidity?.usd || 0,
+        volumeH1: pair.volume?.h1 || 0,
+        priceChangeH1: pair.priceChange?.h1 || 0,
+        ageMinutes,
+        url: pair.url || '',
+        createdAt: pair.pairCreatedAt,
       });
     }
     return newCoins;
