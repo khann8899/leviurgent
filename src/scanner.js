@@ -193,7 +193,7 @@ async function analyzeCoin(mintAddress, modeConfig, connection) {
     score,
     flags,
     positives,
-    passesFilters: score >= 4 && !honeypotInfo.isHoneypot,
+    passesFilters: score >= 2 && !honeypotInfo.isHoneypot,
   };
 }
 
