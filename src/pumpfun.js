@@ -4,7 +4,7 @@ const seenTokens = new Set();
 async function fetchNewPumpFunTokens() {
   try {
     const response = await axios.get(
-      'https://api.dexscreener.com/latest/dex/pairs/solana',
+      'https://api.dexscreener.com/latest/dex/search?q=pump.fun&chainIds=solana',
       { timeout: 8000 }
     );
     const pairs = response.data?.pairs || [];
