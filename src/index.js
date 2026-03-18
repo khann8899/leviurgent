@@ -7,7 +7,7 @@ const { MODES } = require('../config/modes');
 const { analyzeCoin } = require('./scanner');
 const { initWallet, buyToken, getSOLBalance, getSOLPrice } = require('./trader');
 const { monitorPositions, closeAllPositions } = require('./monitor');
-const { fetchNewPumpFunTokens, fetchRaydiumNewPairs } = require('./pumpfun');
+const { fetchNewPumpFunTokens } = require('./pumpfun');
 const {
   initBot, getBot, sendStartupMessage,
   sendCoinAlert, sendTradeOpened,
@@ -15,182 +15,143 @@ const {
   removeButtons,
 } = require('./telegram');
 
-// Validate environment
 function validateEnv() {
   const required = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WALLET_PRIVATE_KEY', 'SOLANA_RPC_URL'];
   for (const key of required) {
-    if (!process.env[key]) {
-      throw new Error(`Missing required environment variable: ${key}`);
-    }
+    if (!process.env[key]) throw new Error(`Missing: ${key}`);
   }
 }
 
 async function main() {
   validateEnv();
 
-  // Initialize connections
   const connection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
   const wallet = initWallet();
-  const bot = initBot();
 
   console.log(`✅ Wallet: ${wallet.publicKey.toString()}`);
 
-  // Get initial balance
   const initialSOL = await getSOLBalance(connection, wallet.publicKey);
   const solPrice = await getSOLPrice();
-  state.weekStartBalance = initialSOL * solPrice;
-  state.betSizeUSD = (initialSOL * solPrice) / 4; // Auto set bet size based on balance
+  const initialUSD = initialSOL * solPrice;
 
-  console.log(`💰 Balance: ${initialSOL.toFixed(4)} SOL ($${(initialSOL * solPrice).toFixed(2)})`);
-  console.log(`🎯 Bet size: $${state.betSizeUSD.toFixed(2)} per slot`);
+  state.weekStartBalance = initialUSD;
+  state.betSizeUSD = parseFloat((initialUSD / 4).toFixed(2));
+
+  console.log(`💰 Balance: ${initialSOL.toFixed(4)} SOL ($${initialUSD.toFixed(2)})`);
+  console.log(`🎯 Bet size: $${state.betSizeUSD} per slot`);
+
+  const bot = initBot();
+
+  // Wait for bot to be ready
+  await new Promise(resolve => setTimeout(resolve, 3000));
 
   await sendStartupMessage();
 
-  // ==================== COMMAND HANDLERS ====================
+  // ==================== COMMANDS ====================
 
-  // Mode switching
   for (let i = 1; i <= 4; i++) {
-    bot.onText(new RegExp(`/mode${i}`), async (msg) => {
+    bot.onText(new RegExp(`^/mode${i}$`), async (msg) => {
       if (msg.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
-
       const prevMode = state.currentMode;
       const prevStats = state.sessionStats;
       const mode = MODES[i];
-
-      // Send session summary before switching
-      const sessionSummary = 
-        `📊 Mode ${prevMode} Session Summary:\n` +
-        `Trades: ${prevStats.trades} | Net: ${prevStats.netPnlPercent >= 0 ? '+' : ''}${prevStats.netPnlPercent.toFixed(1)}%\n\n` +
-        `Switching to Mode ${i} ${mode.emoji} — ${mode.name}`;
-
-      await bot.sendMessage(msg.chat.id, sessionSummary);
-
-      // Reset session stats
+      await bot.sendMessage(msg.chat.id,
+        `📊 Mode ${prevMode} Session:\nTrades: ${prevStats.trades} | Net: ${prevStats.netPnlPercent >= 0 ? '+' : ''}${prevStats.netPnlPercent.toFixed(1)}%\n\n` +
+        `Switching to Mode ${i} ${mode.emoji} — ${mode.name}`
+      );
       state.currentMode = i;
       state.sessionStats = { mode: i, trades: 0, netPnlPercent: 0, startTime: new Date() };
     });
   }
 
-  // Pause
-  bot.onText(/\/pause/, async (msg) => {
+  bot.onText(/^\/pause$/, async (msg) => {
     if (msg.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
     state.isPaused = true;
-    await bot.sendMessage(msg.chat.id, '⏸️ Bot paused. No new trades will open.\nUse /resume to restart.');
+    await bot.sendMessage(msg.chat.id, '⏸️ Paused. Use /resume to restart.');
   });
 
-  // Resume
-  bot.onText(/\/resume/, async (msg) => {
+  bot.onText(/^\/resume$/, async (msg) => {
     if (msg.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
     state.isPaused = false;
-    await bot.sendMessage(msg.chat.id, '▶️ Bot resumed. Scanning for new coins...');
+    await bot.sendMessage(msg.chat.id, '▶️ Resumed. Scanning...');
   });
 
-  // Close all positions
-  bot.onText(/\/closeall/, async (msg) => {
+  bot.onText(/^\/closeall$/, async (msg) => {
     if (msg.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
     const count = Object.keys(state.openPositions).length;
-    if (count === 0) {
-      await bot.sendMessage(msg.chat.id, '📭 No open positions to close.');
-      return;
-    }
+    if (count === 0) { await bot.sendMessage(msg.chat.id, '📭 No open positions.'); return; }
     await bot.sendMessage(msg.chat.id, `⏳ Closing ${count} position(s)...`);
     const totalUSD = await closeAllPositions(connection, wallet);
     await sendCloseAllConfirmation(totalUSD);
   });
 
-  // Portfolio
-  bot.onText(/\/portfolio/, async (msg) => {
+  bot.onText(/^\/portfolio$/, async (msg) => {
     if (msg.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
     const positions = Object.values(state.openPositions);
-
-    if (positions.length === 0) {
-      await bot.sendMessage(msg.chat.id, '📭 No open positions.');
-      return;
-    }
-
+    if (positions.length === 0) { await bot.sendMessage(msg.chat.id, '📭 No open positions.'); return; }
     let message = `📋 *Open Positions (${positions.length}/4)*\n\n`;
     for (const pos of positions) {
       const multiplier = pos.currentPrice / pos.entryPrice;
-      const pnlPercent = (multiplier - 1) * 100;
-      const emoji = pnlPercent >= 0 ? '🟢' : '🔴';
-      message += `${emoji} *$${pos.symbol}*\n`;
-      message += `Entry: $${pos.entryPrice.toFixed(8)} | Now: $${pos.currentPrice.toFixed(8)}\n`;
-      message += `P&L: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(1)}% (${multiplier.toFixed(2)}x)\n`;
-      message += `Remaining: ${pos.remainingPercent}% of position\n\n`;
+      const pnl = (multiplier - 1) * 100;
+      message += `${pnl >= 0 ? '🟢' : '🔴'} *$${pos.symbol}*\n`;
+      message += `P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% (${multiplier.toFixed(2)}x)\n`;
+      message += `Remaining: ${pos.remainingPercent}%\n\n`;
     }
-
     await bot.sendMessage(msg.chat.id, message, { parse_mode: 'Markdown' });
   });
 
-  // Status
-  bot.onText(/\/status/, async (msg) => {
+  bot.onText(/^\/status$/, async (msg) => {
     if (msg.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
     const mode = MODES[state.currentMode];
-    const solBalance = await getSOLBalance(connection, wallet.publicKey);
+    const solBal = await getSOLBalance(connection, wallet.publicKey);
     const solPriceNow = await getSOLPrice();
-    const usdBalance = solBalance * solPriceNow;
-
     await bot.sendMessage(msg.chat.id,
       `📡 *Bot Status*\n\n` +
       `Mode: ${mode.emoji} ${mode.name}\n` +
       `Status: ${state.isPaused ? '⏸️ Paused' : '▶️ Active'}\n` +
       `Open Positions: ${Object.keys(state.openPositions).length}/4\n` +
-      `Bet Size: $${state.betSizeUSD.toFixed(2)}\n` +
-      `Balance: ${solBalance.toFixed(4)} SOL ($${usdBalance.toFixed(2)})`,
+      `Bet Size: $${state.betSizeUSD}\n` +
+      `Balance: ${solBal.toFixed(4)} SOL ($${(solBal * solPriceNow).toFixed(2)})`,
       { parse_mode: 'Markdown' }
     );
   });
 
-  // Bet size
-  bot.onText(/\/betsize (.+)/, async (msg, match) => {
+  bot.onText(/^\/betsize (.+)$/, async (msg, match) => {
     if (msg.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
-    const input = match[1].trim().replace('$', '');
-    const amount = parseFloat(input);
-    if (isNaN(amount) || amount <= 0) {
-      await bot.sendMessage(msg.chat.id, '❌ Invalid amount. Example: /betsize 5 or /betsize $5');
-      return;
-    }
+    const amount = parseFloat(match[1].replace('$', ''));
+    if (isNaN(amount) || amount <= 0) { await bot.sendMessage(msg.chat.id, '❌ Example: /betsize 3'); return; }
     state.betSizeUSD = amount;
-    await bot.sendMessage(msg.chat.id, `✅ Bet size updated to $${amount} per trade`);
+    await bot.sendMessage(msg.chat.id, `✅ Bet size: $${amount} per trade`);
   });
 
-  // Weekly report
-  bot.onText(/\/report/, async (msg) => {
+  bot.onText(/^\/report$/, async (msg) => {
     if (msg.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
-    const solBalance = await getSOLBalance(connection, wallet.publicKey);
+    const solBal = await getSOLBalance(connection, wallet.publicKey);
     const solPriceNow = await getSOLPrice();
-    await sendWeeklyReport(state.weeklyStats[state.currentMode], state.currentMode, solBalance, solPriceNow);
+    await sendWeeklyReport(state.weeklyStats[state.currentMode], state.currentMode, solBal, solPriceNow);
   });
 
-  // ==================== APPROVAL HANDLERS ====================
+  // ==================== APPROVALS ====================
 
   bot.on('callback_query', async (query) => {
     if (query.message.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) return;
-
-    const data = query.data;
     await bot.answerCallbackQuery(query.id);
+    const data = query.data;
 
     if (data.startsWith('approve_')) {
       const mintAddress = data.replace('approve_', '');
       const pending = state.pendingApprovals[mintAddress];
-      if (!pending) {
-        await bot.sendMessage(query.message.chat.id, '⏰ This alert has expired or already been processed.');
-        return;
-      }
-
-      // Clear timeout
+      if (!pending) { await bot.sendMessage(query.message.chat.id, '⏰ Alert expired.'); return; }
       clearTimeout(pending.timeout);
       delete state.pendingApprovals[mintAddress];
       await removeButtons(query.message.message_id);
 
-      // Check slots available
       if (Object.keys(state.openPositions).length >= 4) {
-        await bot.sendMessage(query.message.chat.id, '⚠️ All 4 slots are full. Wait for a position to close.');
+        await bot.sendMessage(query.message.chat.id, '⚠️ All 4 slots full.');
         return;
       }
 
       await bot.sendMessage(query.message.chat.id, `⏳ Buying $${pending.coin.symbol}...`);
-
       const result = await buyToken(mintAddress, state.betSizeUSD, connection, wallet);
 
       if (result.success) {
@@ -206,16 +167,13 @@ async function main() {
     if (data.startsWith('skip_')) {
       const mintAddress = data.replace('skip_', '');
       const pending = state.pendingApprovals[mintAddress];
-      if (pending) {
-        clearTimeout(pending.timeout);
-        delete state.pendingApprovals[mintAddress];
-      }
+      if (pending) { clearTimeout(pending.timeout); delete state.pendingApprovals[mintAddress]; }
       await removeButtons(query.message.message_id);
       await bot.sendMessage(query.message.chat.id, `⏭️ Skipped.`);
     }
   });
 
-  // ==================== MAIN SCANNING LOOP ====================
+  // ==================== SCAN LOOP ====================
 
   async function scanForNewCoins() {
     if (state.isPaused) return;
@@ -223,6 +181,7 @@ async function main() {
 
     try {
       const newTokens = await fetchNewPumpFunTokens();
+      console.log(`🔎 Found ${newTokens.length} new tokens to check`);
 
       for (const token of newTokens) {
         if (state.isPaused) break;
@@ -233,83 +192,60 @@ async function main() {
         const modeConfig = MODES[state.currentMode];
         console.log(`🔍 Analyzing ${token.symbol} (${token.mintAddress.slice(0, 8)}...)`);
 
-        const analysis = await analyzeCoin(token.mintAddress, modeConfig, connection);
-        if (!analysis || !analysis.passesFilters) {
-          console.log(`❌ ${token.symbol} failed filters (score: ${analysis?.score || 0})`);
-          continue;
-        }
+        const analysis = await analyzeCoin(token, modeConfig, connection);
+        if (!analysis) continue;
 
-        console.log(`✅ ${token.symbol} passed! Score: ${analysis.score}/10 — sending alert`);
+        console.log(`📊 ${token.symbol} score: ${analysis.score}/10 | passes: ${analysis.passesFilters}`);
 
+        if (!analysis.passesFilters) continue;
+
+        console.log(`✅ ${token.symbol} passed! Sending alert...`);
         const messageId = await sendCoinAlert(analysis, modeConfig);
 
-        // Set auto-skip timeout (10 minutes)
         const timeout = setTimeout(async () => {
           if (state.pendingApprovals[token.mintAddress]) {
             delete state.pendingApprovals[token.mintAddress];
             await removeButtons(messageId);
-            await getBot().sendMessage(
-              process.env.TELEGRAM_CHAT_ID,
-              `⏰ Auto-skipped $${token.symbol} (10 min timeout)`
-            );
+            await getBot().sendMessage(process.env.TELEGRAM_CHAT_ID, `⏰ Auto-skipped $${token.symbol}`);
           }
         }, 10 * 60 * 1000);
 
-        state.pendingApprovals[token.mintAddress] = {
-          coin: analysis,
-          timeout,
-          messageId,
-        };
+        state.pendingApprovals[token.mintAddress] = { coin: analysis, timeout, messageId };
       }
     } catch (e) {
       console.error('Scan error:', e.message);
     }
   }
 
-  // ==================== WEEKLY REPORT SCHEDULER ====================
+  // ==================== WEEKLY REPORT ====================
 
   function scheduleWeeklyReport() {
     const now = new Date();
     const nextSunday = new Date(now);
     nextSunday.setDate(now.getDate() + (7 - now.getDay()));
-    nextSunday.setHours(20, 0, 0, 0); // 8pm Sunday
-
-    const msUntilReport = nextSunday - now;
-
+    nextSunday.setHours(20, 0, 0, 0);
+    const ms = nextSunday - now;
     setTimeout(async () => {
-      const solBalance = await getSOLBalance(connection, wallet.publicKey);
+      const solBal = await getSOLBalance(connection, wallet.publicKey);
       const solPriceNow = await getSOLPrice();
-      await sendWeeklyReport(state.weeklyStats[state.currentMode], state.currentMode, solBalance, solPriceNow);
-
-      // Reset weekly stats
-      state.weeklyStats[state.currentMode] = {
-        trades: 0, wins: 0, losses: 0,
-        bestMultiplier: 0, worstMultiplier: 0,
-        netPnlPercent: 0, startBalance: solBalance * solPriceNow,
-      };
-      state.weekStartTime = new Date();
-
-      scheduleWeeklyReport(); // Schedule next one
-    }, msUntilReport);
+      await sendWeeklyReport(state.weeklyStats[state.currentMode], state.currentMode, solBal, solPriceNow);
+      state.weeklyStats[state.currentMode] = { trades: 0, wins: 0, losses: 0, bestMultiplier: 0, worstMultiplier: 0, netPnlPercent: 0 };
+      scheduleWeeklyReport();
+    }, ms);
   }
-
-  // ==================== START LOOPS ====================
 
   scheduleWeeklyReport();
 
-  // Scan for new coins every 15 seconds
-  setInterval(scanForNewCoins, 60000);
+  // Scan every 45 seconds
+  setInterval(scanForNewCoins, 45000);
 
-  // Monitor open positions every 30 seconds
-  setInterval(() => monitorPositions(connection, wallet), 60000);
+  // Monitor positions every 30 seconds
+  setInterval(() => monitorPositions(connection, wallet), 30000);
 
-  // Initial scan immediately
+  // Initial scan
   await scanForNewCoins();
 
   console.log('🚀 Levi Urgent 1.0 is running!');
 }
 
-main().catch((e) => {
-  console.error('Fatal error:', e);
-  process.exit(1);
-});
+main().catch(e => { console.error('Fatal:', e); process.exit(1); });
