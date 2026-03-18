@@ -6,7 +6,7 @@ const seenTokens = new Set();
 async function fetchNewPumpFunTokens() {
   try {
     const response = await axios.get(
-      'https://api.dexscreener.com/latest/dex/search?q=pump.fun&chainIds=solana',
+      'https://api.dexscreener.com/latest/dex/search?q=solana&chainIds=solana&rank=1',
       {
         timeout: 10000,
         headers: { 'User-Agent': 'Mozilla/5.0' }
