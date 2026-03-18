@@ -4,9 +4,28 @@ const { Connection, PublicKey, VersionedTransaction, Keypair } = require('@solan
 const bs58 = require('bs58');
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
-const JUPITER_API = 'https://quote-api.jup.ag/v6';
 
-// Initialize wallet from private key
+// Try multiple Jupiter endpoints
+const JUPITER_ENDPOINTS = [
+  'https://quote-api.jup.ag/v6',
+  'https://jup.ag/api/v6',
+];
+
+async function getJupiterQuote(inputMint, outputMint, amount, slippageBps) {
+  for (const base of JUPITER_ENDPOINTS) {
+    try {
+      const response = await axios.get(`${base}/quote`, {
+        params: { inputMint, outputMint, amount, slippageBps },
+        timeout: 10000,
+      });
+      if (response.data) return { quote: response.data, baseUrl: base };
+    } catch (e) {
+      console.log(`Jupiter endpoint ${base} failed: ${e.message}`);
+    }
+  }
+  return null;
+}
+
 function initWallet() {
   const privateKeyString = process.env.WALLET_PRIVATE_KEY;
   if (!privateKeyString) throw new Error('WALLET_PRIVATE_KEY not set');
@@ -14,71 +33,61 @@ function initWallet() {
   return Keypair.fromSecretKey(decoded);
 }
 
-// Get SOL balance
 async function getSOLBalance(connection, publicKey) {
   const balance = await connection.getBalance(new PublicKey(publicKey));
-  return balance / 1e9; // Convert lamports to SOL
+  return balance / 1e9;
 }
 
-// Get SOL price in USD from DexScreener
 async function getSOLPrice() {
   try {
     const response = await axios.get(
-      'https://api.dexscreener.com/latest/dex/pairs/solana/So11111111111111111111111111111111111111112',
+      'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
       { timeout: 5000 }
     );
-    // Fallback to a reasonable estimate if API fails
-    return response.data?.pairs?.[0]?.priceUsd || 150;
+    return response.data?.solana?.usd || 150;
   } catch {
-    return 150; // Fallback SOL price
+    try {
+      const r = await axios.get(
+        'https://price.jup.ag/v4/price?ids=SOL',
+        { timeout: 5000 }
+      );
+      return r.data?.data?.SOL?.price || 150;
+    } catch {
+      return 150;
+    }
   }
 }
 
-// Buy a token using Jupiter
 async function buyToken(mintAddress, amountUSD, connection, wallet) {
   try {
     const solPrice = await getSOLPrice();
     const solAmount = amountUSD / solPrice;
     const lamports = Math.floor(solAmount * 1e9);
 
-    // Get quote from Jupiter
-    const quoteResponse = await axios.get(`${JUPITER_API}/quote`, {
-      params: {
-        inputMint: SOL_MINT,
-        outputMint: mintAddress,
-        amount: lamports,
-        slippageBps: 1000, // 10% slippage for memecoins
-      },
-      timeout: 10000,
-    });
+    const result = await getJupiterQuote(SOL_MINT, mintAddress, lamports, 1000);
+    if (!result) throw new Error('All Jupiter endpoints failed - network issue');
 
-    const quote = quoteResponse.data;
-    if (!quote) throw new Error('No quote available');
+    const { quote, baseUrl } = result;
 
-    // Get swap transaction
-    const swapResponse = await axios.post(`${JUPITER_API}/swap`, {
+    const swapResponse = await axios.post(`${baseUrl}/swap`, {
       quoteResponse: quote,
       userPublicKey: wallet.publicKey.toString(),
       wrapAndUnwrapSol: true,
       dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: 10000, // Small priority fee for faster execution
+      prioritizationFeeLamports: 10000,
     }, { timeout: 10000 });
 
     const { swapTransaction } = swapResponse.data;
-
-    // Deserialize and sign transaction
     const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
     const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
     transaction.sign([wallet]);
 
-    // Send transaction
     const rawTransaction = transaction.serialize();
     const txid = await connection.sendRawTransaction(rawTransaction, {
       skipPreflight: true,
       maxRetries: 3,
     });
 
-    // Wait for confirmation
     await connection.confirmTransaction(txid, 'confirmed');
 
     return {
@@ -89,32 +98,22 @@ async function buyToken(mintAddress, amountUSD, connection, wallet) {
       usdSpent: amountUSD,
     };
   } catch (e) {
+    console.error('Buy error:', e.message);
     return { success: false, error: e.message };
   }
 }
 
-// Sell a percentage of token holdings
 async function sellToken(mintAddress, percentToSell, tokensHeld, connection, wallet) {
   try {
     const tokensToSell = Math.floor(tokensHeld * (percentToSell / 100));
     if (tokensToSell <= 0) return { success: false, error: 'No tokens to sell' };
 
-    // Get quote
-    const quoteResponse = await axios.get(`${JUPITER_API}/quote`, {
-      params: {
-        inputMint: mintAddress,
-        outputMint: SOL_MINT,
-        amount: tokensToSell,
-        slippageBps: 1500, // 15% slippage when selling memecoins
-      },
-      timeout: 10000,
-    });
+    const result = await getJupiterQuote(mintAddress, SOL_MINT, tokensToSell, 1500);
+    if (!result) throw new Error('All Jupiter endpoints failed');
 
-    const quote = quoteResponse.data;
-    if (!quote) throw new Error('No quote available');
+    const { quote, baseUrl } = result;
 
-    // Get swap transaction
-    const swapResponse = await axios.post(`${JUPITER_API}/swap`, {
+    const swapResponse = await axios.post(`${baseUrl}/swap`, {
       quoteResponse: quote,
       userPublicKey: wallet.publicKey.toString(),
       wrapAndUnwrapSol: true,
@@ -146,11 +145,11 @@ async function sellToken(mintAddress, percentToSell, tokensHeld, connection, wal
       usdReceived: solReceived * solPrice,
     };
   } catch (e) {
+    console.error('Sell error:', e.message);
     return { success: false, error: e.message };
   }
 }
 
-// Get current token price in USD
 async function getTokenPrice(mintAddress) {
   try {
     const response = await axios.get(
