@@ -16,9 +16,9 @@ async function fetchNewPumpFunTokens() {
       if (!mint || seenTokens.has(mint)) continue;
       if (mint === 'So11111111111111111111111111111111111111112') continue;
       const ageMinutes = (now - pair.pairCreatedAt) / 1000 / 60;
-      if (ageMinutes > 120 || ageMinutes < 0) continue;
+      if (ageMinutes > 1440 || ageMinutes < 0) continue;
       seenTokens.add(mint);
-      if (seenTokens.size > 5000) {
+      if (seenTokens.size > 50) {
         const first = seenTokens.values().next().value;
         seenTokens.delete(first);
       }
