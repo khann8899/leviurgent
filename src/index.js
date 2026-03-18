@@ -298,10 +298,10 @@ async function main() {
   scheduleWeeklyReport();
 
   // Scan for new coins every 15 seconds
-  setInterval(scanForNewCoins, 15000);
+  setInterval(scanForNewCoins, 60000);
 
   // Monitor open positions every 30 seconds
-  setInterval(() => monitorPositions(connection, wallet), 30000);
+  setInterval(() => monitorPositions(connection, wallet), 60000);
 
   // Initial scan immediately
   await scanForNewCoins();
