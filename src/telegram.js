@@ -6,12 +6,19 @@ const { MODES } = require('../config/modes');
 let bot;
 
 function initBot() {
-  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { 
-  polling: {
-    autoStart: true,
-    params: { timeout: 10 },
-    interval: 2000
-  }
+  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false });
+  
+  // Clear any existing webhook/polling before starting
+  bot.deleteWebHook().then(() => {
+    bot.startPolling({
+      restart: false,
+      params: { timeout: 10 }
+    });
+  });
+  
+  console.log('✅ Telegram bot initialized');
+  return bot;
+}
 });
   console.log('✅ Telegram bot initialized');
   return bot;
