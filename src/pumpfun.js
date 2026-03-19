@@ -2,6 +2,13 @@ const axios = require('axios');
 
 let seenTokens = new Set();
 let lastReset = Date.now();
+let urlIndex = 0;
+
+const URLS = [
+  'https://api.dexscreener.com/latest/dex/search?q=raydium&chainIds=solana',
+  'https://api.dexscreener.com/latest/dex/search?q=pumpfun&chainIds=solana',
+  'https://api.dexscreener.com/latest/dex/search?q=moonshot&chainIds=solana',
+];
 
 async function fetchNewPumpFunTokens() {
   // Reset seen tokens every 5 minutes
@@ -11,11 +18,15 @@ async function fetchNewPumpFunTokens() {
     console.log('🔄 Reset seen tokens list');
   }
 
+  // Rotate between URLs each scan
+  const url = URLS[urlIndex % URLS.length];
+  urlIndex++;
+
   try {
-    const response = await axios.get(
-      'https://api.dexscreener.com/latest/dex/search?q=pump&chainIds=solana',
-      { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } }
-    );
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
 
     const pairs = response.data?.pairs || [];
     const newCoins = [];
@@ -28,6 +39,7 @@ async function fetchNewPumpFunTokens() {
       if (!mint) continue;
       if (mint === 'So11111111111111111111111111111111111111112') continue;
       if (pair.baseToken?.symbol === 'SOL') continue;
+      if (pair.baseToken?.symbol === 'WSOL') continue;
       if (seenTokens.has(mint)) continue;
 
       const ageMinutes = (now - pair.pairCreatedAt) / 1000 / 60;
@@ -50,7 +62,7 @@ async function fetchNewPumpFunTokens() {
       });
     }
 
-    console.log(`📡 DexScreener returned ${pairs.length} pairs, ${newCoins.length} new to analyze`);
+    console.log(`📡 DexScreener [${url.split('q=')[1].split('&')[0]}] returned ${pairs.length} pairs, ${newCoins.length} new`);
     return newCoins;
 
   } catch (e) {
