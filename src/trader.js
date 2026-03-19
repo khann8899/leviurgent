@@ -1,30 +1,10 @@
-// Levi Urgent - Trade Execution via Jupiter DEX
+// Levi Urgent - Trade Execution via Raydium API
 const axios = require('axios');
-const { Connection, PublicKey, VersionedTransaction, Keypair } = require('@solana/web3.js');
+const { Connection, PublicKey, VersionedTransaction, Keypair, Transaction, SystemProgram } = require('@solana/web3.js');
 const bs58 = require('bs58');
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
-
-// Try multiple Jupiter endpoints
-const JUPITER_ENDPOINTS = [
-  'https://quote-api.jup.ag/v6',
-  'https://jup.ag/api/v6',
-];
-
-async function getJupiterQuote(inputMint, outputMint, amount, slippageBps) {
-  for (const base of JUPITER_ENDPOINTS) {
-    try {
-      const response = await axios.get(`${base}/quote`, {
-        params: { inputMint, outputMint, amount, slippageBps },
-        timeout: 10000,
-      });
-      if (response.data) return { quote: response.data, baseUrl: base };
-    } catch (e) {
-      console.log(`Jupiter endpoint ${base} failed: ${e.message}`);
-    }
-  }
-  return null;
-}
+const RAYDIUM_SWAP_API = 'https://transaction-v1.raydium.io';
 
 function initWallet() {
   const privateKeyString = process.env.WALLET_PRIVATE_KEY;
@@ -46,107 +26,7 @@ async function getSOLPrice() {
     );
     return response.data?.solana?.usd || 150;
   } catch {
-    try {
-      const r = await axios.get(
-        'https://price.jup.ag/v4/price?ids=SOL',
-        { timeout: 5000 }
-      );
-      return r.data?.data?.SOL?.price || 150;
-    } catch {
-      return 150;
-    }
-  }
-}
-
-async function buyToken(mintAddress, amountUSD, connection, wallet) {
-  try {
-    const solPrice = await getSOLPrice();
-    const solAmount = amountUSD / solPrice;
-    const lamports = Math.floor(solAmount * 1e9);
-
-    const result = await getJupiterQuote(SOL_MINT, mintAddress, lamports, 1000);
-    if (!result) throw new Error('All Jupiter endpoints failed - network issue');
-
-    const { quote, baseUrl } = result;
-
-    const swapResponse = await axios.post(`${baseUrl}/swap`, {
-      quoteResponse: quote,
-      userPublicKey: wallet.publicKey.toString(),
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: 10000,
-    }, { timeout: 10000 });
-
-    const { swapTransaction } = swapResponse.data;
-    const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
-    const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-    transaction.sign([wallet]);
-
-    const rawTransaction = transaction.serialize();
-    const txid = await connection.sendRawTransaction(rawTransaction, {
-      skipPreflight: true,
-      maxRetries: 3,
-    });
-
-    await connection.confirmTransaction(txid, 'confirmed');
-
-    return {
-      success: true,
-      txid,
-      tokensReceived: parseInt(quote.outAmount),
-      solSpent: solAmount,
-      usdSpent: amountUSD,
-    };
-  } catch (e) {
-    console.error('Buy error:', e.message);
-    return { success: false, error: e.message };
-  }
-}
-
-async function sellToken(mintAddress, percentToSell, tokensHeld, connection, wallet) {
-  try {
-    const tokensToSell = Math.floor(tokensHeld * (percentToSell / 100));
-    if (tokensToSell <= 0) return { success: false, error: 'No tokens to sell' };
-
-    const result = await getJupiterQuote(mintAddress, SOL_MINT, tokensToSell, 1500);
-    if (!result) throw new Error('All Jupiter endpoints failed');
-
-    const { quote, baseUrl } = result;
-
-    const swapResponse = await axios.post(`${baseUrl}/swap`, {
-      quoteResponse: quote,
-      userPublicKey: wallet.publicKey.toString(),
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: 10000,
-    }, { timeout: 10000 });
-
-    const { swapTransaction } = swapResponse.data;
-    const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
-    const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-    transaction.sign([wallet]);
-
-    const rawTransaction = transaction.serialize();
-    const txid = await connection.sendRawTransaction(rawTransaction, {
-      skipPreflight: true,
-      maxRetries: 3,
-    });
-
-    await connection.confirmTransaction(txid, 'confirmed');
-
-    const solReceived = parseInt(quote.outAmount) / 1e9;
-    const solPrice = await getSOLPrice();
-
-    return {
-      success: true,
-      txid,
-      tokensSold: tokensToSell,
-      solReceived,
-      usdReceived: solReceived * solPrice,
-    };
-  } catch (e) {
-    console.error('Sell error:', e.message);
-    return { success: false, error: e.message };
+    return 150;
   }
 }
 
@@ -161,6 +41,167 @@ async function getTokenPrice(mintAddress) {
     return parseFloat(pairs[0].priceUsd) || null;
   } catch {
     return null;
+  }
+}
+
+// Get swap transaction from Raydium
+async function getRaydiumSwapTx(inputMint, outputMint, amount, wallet) {
+  try {
+    // Step 1: Get priority fee
+    const priorityResponse = await axios.get(
+      `${RAYDIUM_SWAP_API}/main/auto-fee`,
+      { timeout: 8000 }
+    );
+    const priorityFee = priorityResponse.data?.data?.h || 10000;
+
+    // Step 2: Get swap transaction
+    const swapResponse = await axios.post(
+      `${RAYDIUM_SWAP_API}/transaction/swap-base-in`,
+      {
+        computeUnitPriceMicroLamports: String(priorityFee),
+        swapResponse: {
+          id: `swap-${Date.now()}`,
+          success: true,
+          version: 'V0',
+          data: {
+            swapType: 'BaseIn',
+            inputMint,
+            inputAmount: String(amount),
+            outputMint,
+            outputAmount: '0',
+            otherAmountThreshold: '0',
+            slippageBps: 1000,
+            priceImpactPct: 0,
+            referencePrograms: [],
+            routePlan: []
+          }
+        },
+        txVersion: 'V0',
+        wallet: wallet.publicKey.toString(),
+        wrapSol: inputMint === SOL_MINT,
+        unwrapSol: outputMint === SOL_MINT,
+      },
+      { timeout: 10000 }
+    );
+
+    return swapResponse.data;
+  } catch (e) {
+    throw new Error(`Raydium API error: ${e.message}`);
+  }
+}
+
+// Alternative: Use Raydium's quote + swap flow
+async function swapWithRaydium(inputMint, outputMint, amountLamports, wallet, connection) {
+  try {
+    // Get quote from Raydium
+    const quoteResponse = await axios.get(
+      `https://api-v3.raydium.io/compute/swap-base-in?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountLamports}&slippageBps=1000&txVersion=V0`,
+      { timeout: 10000 }
+    );
+
+    if (!quoteResponse.data?.success) {
+      throw new Error('Raydium quote failed');
+    }
+
+    const swapData = quoteResponse.data.data;
+
+    // Get swap transaction
+    const txResponse = await axios.post(
+      'https://api-v3.raydium.io/transaction/swap-base-in',
+      {
+        computeUnitPriceMicroLamports: '10000',
+        swapResponse: swapData,
+        txVersion: 'V0',
+        wallet: wallet.publicKey.toString(),
+        wrapSol: inputMint === SOL_MINT,
+        unwrapSol: outputMint === SOL_MINT,
+      },
+      { timeout: 10000 }
+    );
+
+    if (!txResponse.data?.success) {
+      throw new Error('Raydium swap transaction failed');
+    }
+
+    const transactions = txResponse.data.data;
+
+    // Sign and send each transaction
+    let lastTxid = null;
+    for (const txData of transactions) {
+      const txBuffer = Buffer.from(txData.transaction, 'base64');
+      const tx = VersionedTransaction.deserialize(txBuffer);
+      tx.sign([wallet]);
+
+      const txid = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: true,
+        maxRetries: 3,
+      });
+
+      await connection.confirmTransaction(txid, 'confirmed');
+      lastTxid = txid;
+      console.log(`✅ Transaction confirmed: ${txid}`);
+    }
+
+    return { success: true, txid: lastTxid, outAmount: swapData.outputAmount };
+
+  } catch (e) {
+    console.error('Raydium swap error:', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+async function buyToken(mintAddress, amountUSD, connection, wallet) {
+  try {
+    const solPrice = await getSOLPrice();
+    const solAmount = amountUSD / solPrice;
+    const lamports = Math.floor(solAmount * 1e9);
+
+    console.log(`💱 Buying ${mintAddress} with ${solAmount.toFixed(4)} SOL ($${amountUSD})`);
+
+    const result = await swapWithRaydium(SOL_MINT, mintAddress, lamports, wallet, connection);
+
+    if (result.success) {
+      return {
+        success: true,
+        txid: result.txid,
+        tokensReceived: parseInt(result.outAmount) || 0,
+        solSpent: solAmount,
+        usdSpent: amountUSD,
+      };
+    } else {
+      return { success: false, error: result.error };
+    }
+  } catch (e) {
+    console.error('Buy error:', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+async function sellToken(mintAddress, percentToSell, tokensHeld, connection, wallet) {
+  try {
+    const tokensToSell = Math.floor(tokensHeld * (percentToSell / 100));
+    if (tokensToSell <= 0) return { success: false, error: 'No tokens to sell' };
+
+    console.log(`💱 Selling ${tokensToSell} tokens (${percentToSell}%) of ${mintAddress}`);
+
+    const result = await swapWithRaydium(mintAddress, SOL_MINT, tokensToSell, wallet, connection);
+
+    if (result.success) {
+      const solReceived = parseInt(result.outAmount) / 1e9;
+      const solPrice = await getSOLPrice();
+      return {
+        success: true,
+        txid: result.txid,
+        tokensSold: tokensToSell,
+        solReceived,
+        usdReceived: solReceived * solPrice,
+      };
+    } else {
+      return { success: false, error: result.error };
+    }
+  } catch (e) {
+    console.error('Sell error:', e.message);
+    return { success: false, error: e.message };
   }
 }
 
