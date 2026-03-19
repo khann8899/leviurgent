@@ -1,16 +1,20 @@
-// Levi Urgent - Token Scanner via DexScreener
 const axios = require('axios');
 
-const seenTokens = new Set();
+let seenTokens = new Set();
+let lastReset = Date.now();
 
 async function fetchNewPumpFunTokens() {
+  // Reset seen tokens every 5 minutes
+  if (Date.now() - lastReset > 5 * 60 * 1000) {
+    seenTokens = new Set();
+    lastReset = Date.now();
+    console.log('🔄 Reset seen tokens list');
+  }
+
   try {
     const response = await axios.get(
-      'https://api.dexscreener.com/latest/dex/search?q=solana&chainIds=solana&rank=1',
-      {
-        timeout: 10000,
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      }
+      'https://api.dexscreener.com/latest/dex/search?q=pump&chainIds=solana',
+      { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } }
     );
 
     const pairs = response.data?.pairs || [];
@@ -23,17 +27,13 @@ async function fetchNewPumpFunTokens() {
       const mint = pair.baseToken?.address;
       if (!mint) continue;
       if (mint === 'So11111111111111111111111111111111111111112') continue;
+      if (pair.baseToken?.symbol === 'SOL') continue;
       if (seenTokens.has(mint)) continue;
 
       const ageMinutes = (now - pair.pairCreatedAt) / 1000 / 60;
       if (ageMinutes > 1440 || ageMinutes < 0) continue;
 
       seenTokens.add(mint);
-
-      if (seenTokens.size > 100) {
-        const entries = [...seenTokens];
-        entries.slice(0, 50).forEach(k => seenTokens.delete(k));
-      }
 
       newCoins.push({
         mintAddress: mint,
@@ -46,7 +46,6 @@ async function fetchNewPumpFunTokens() {
         txnsH1: (pair.txns?.h1?.buys || 0) + (pair.txns?.h1?.sells || 0),
         ageMinutes,
         url: pair.url || `https://dexscreener.com/solana/${mint}`,
-        pairAddress: pair.pairAddress || '',
         createdAt: pair.pairCreatedAt,
       });
     }
